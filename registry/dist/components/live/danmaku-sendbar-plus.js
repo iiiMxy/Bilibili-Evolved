@@ -26,6 +26,10 @@
   // 想 1:1 使用原生图标时, 把它的 <svg>...</svg> 整段贴到这里(留空则用内置的画法)
   const EMOJI_ICON_SVG = '';
 
+  // 大表情(装扮/房间/UP主)用 emoticon_unique 发送, 需要额外的 dm_type / color 参数。
+  // 想关掉这类表情, 把这个改成 false。
+  const ENABLE_BIG_EMOTES = true;
+
   // 拉不到 B 站表情包时使用的兜底字符表情
   const FALLBACK_EMOJIS = [
     '😀', '😂', '🤣', '😊', '😍', '🤔', '😭', '😡', '👍', '👎',
@@ -65,18 +69,23 @@
   }
 
   let cachedRoomId = null;
+  // 缓存是跟着网址里的房间短号走的: 网址变了(换直播间)缓存自动失效, 不会发到上一个房间
+  let cachedRoomShortId = null;
 
   async function getRoomId() {
-    if (cachedRoomId) {
+    const shortId = (location.pathname.match(/^\/(?:blanc\/)?(\d+)/) || [])[1] || '';
+    if (cachedRoomId && cachedRoomShortId === shortId) {
       return cachedRoomId;
     }
+    // 注意: B 站新版页面里已经没有 __NEPTUNE_IS_MY_WAIFU__ 这个全局了,
+    // 读不到属正常情况, 会自动走下面的网址解析 + room_init
     const global = page.__NEPTUNE_IS_MY_WAIFU__;
     const fromGlobal = global?.roomInitRes?.room_id ?? global?.roomInfoRes?.room_id;
     if (fromGlobal) {
       cachedRoomId = String(fromGlobal);
+      cachedRoomShortId = shortId;
       return cachedRoomId;
     }
-    const shortId = (location.pathname.match(/^\/(?:blanc\/)?(\d+)/) || [])[1];
     if (!shortId) {
       return null;
     }
@@ -88,16 +97,23 @@
       const json = await response.json();
       if (json?.data?.room_id) {
         cachedRoomId = String(json.data.room_id);
+        cachedRoomShortId = shortId;
         return cachedRoomId;
       }
     } catch (error) {
       console.warn('[弹幕发送] room_init 请求失败', error);
     }
     cachedRoomId = shortId;
+    cachedRoomShortId = shortId;
     return cachedRoomId;
   }
 
-  async function sendDanmaku(text) {
+  /**
+   * 发送弹幕。
+   * @param text 要发的文本, 或大表情的 emoticon_unique
+   * @param isEmote 是不是大表情; 大表情要额外带 dm_type=1 和特殊 color
+   */
+  async function sendDanmaku(text, isEmote) {
     const csrf = getCsrf();
     if (!csrf) {
       return { ok: false, message: '未登录：cookie 里没有 bili_jct，请重新登录 B 站' };
@@ -110,7 +126,8 @@
     const body = new URLSearchParams({
       roomid,
       msg: text,
-      color: '16777215',
+      // 大表情: 原生请求用的是 65532, 这是表情弹幕的专用标记
+      color: isEmote ? '65532' : '16777215',
       fontsize: '25',
       mode: '1',
       bubble: '0',
@@ -118,8 +135,13 @@
       csrf_token: csrf,
       rnd: String(Math.floor(Date.now() / 1000)),
     });
+    if (isEmote) {
+      body.set('dm_type', '1');
+    }
 
     let response;
+    // 打印目标房间, 排查「换直播间后发到旧房间」这类问题时看这一行
+    console.log('[弹幕发送] 目标房间', roomid);
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), SEND_TIMEOUT_MS);
     try {
@@ -241,7 +263,10 @@
 
   let emoteCache = null;
   let emoteLoading = false;
+  // 记录上一次是不是「请求失败」，用来决定下次打开面板要不要重试
+  let emoteFailed = false;
 
+  /** 拉取表情，按「表情包」分组返回: [{ name, emoticons: [{ text, url, desc }] }] */
   async function loadEmotes() {
     if (emoteCache || emoteLoading) {
       return emoteCache;
@@ -254,18 +279,41 @@
       });
       const json = await response.json();
       const packages = json?.data?.data ?? [];
-      const list = [];
+      const groups = [];
+      const isTextCode = text => /^\[.+\]$/.test(String(text ?? ''));
       packages.forEach(pack => {
+        const emoticons = [];
         (pack.emoticons ?? []).forEach(emote => {
-          if (emote?.url && emote?.emoji) {
-            list.push({ text: emote.emoji, url: emote.url, desc: emote.descript || emote.emoji });
+          if (!emote?.url) {
+            return;
           }
+          const name = String(emote.emoji ?? '').trim();
+          const unique = String(emote.emoticon_unique ?? '').trim();
+          const code = isTextCode(name);
+          // 文本码表情用 emoji 发; 其余(大表情/装扮)必须用 emoticon_unique,
+          // 拿不到 unique 的宁可不要, 否则又会被当纯文字发出去
+          if (!code && (!ENABLE_BIG_EMOTES || !unique)) {
+            return;
+          }
+          emoticons.push({
+            text: code ? name : name || unique,
+            url: emote.url,
+            desc: emote.descript || name || unique,
+            unique: code ? '' : unique,
+            big: !code,
+          });
         });
+        // 空包直接丢掉, 免得出现点不开的空标签
+        if (emoticons.length) {
+          groups.push({ name: pack.pkg_name || '表情', emoticons });
+        }
       });
-      emoteCache = list.length ? list : null;
+      emoteCache = groups.length ? groups : null;
+      emoteFailed = false;
     } catch (error) {
       console.warn('[弹幕发送] 表情列表拉取失败', error);
       emoteCache = null;
+      emoteFailed = true;
     } finally {
       emoteLoading = false;
     }
@@ -340,33 +388,99 @@
     return svg;
   }
 
+  function createEmoteButton(item) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'lp-emote';
+    button.dataset.text = item.text;
+    if (item.big) {
+      // 大表情不能和文字混发, 点一下就单独发出去
+      button.dataset.emote = item.unique;
+      button.classList.add('lp-emote-big');
+      button.title = `${item.desc}（大表情，点一下直接发送）`;
+    } else {
+      button.title = item.desc;
+    }
+    const image = document.createElement('img');
+    image.src = item.url;
+    image.alt = item.desc;
+    image.loading = 'lazy';
+    button.appendChild(image);
+    return button;
+  }
+
+  /**
+   * 渲染表情面板: 顶部按「表情包」切换(对齐原生面板), 下面是当前包的网格。
+   * 返回是否拿到了真实表情; 没拿到时退回字符表情。
+   */
   async function renderEmotes(panel) {
     panel.innerHTML = '';
-    const list = await loadEmotes();
-    if (!list) {
+    const groups = await loadEmotes();
+
+    const grid = document.createElement('div');
+    grid.className = 'lp-grid';
+
+    if (!groups) {
       FALLBACK_EMOJIS.forEach(character => {
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'lp-emote';
         button.textContent = character;
         button.dataset.text = character;
-        panel.appendChild(button);
+        grid.appendChild(button);
       });
-      return;
+      panel.appendChild(grid);
+      return false;
     }
-    list.forEach(item => {
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'lp-emote';
-      button.dataset.text = item.text;
-      button.title = item.desc;
-      const image = document.createElement('img');
-      image.src = item.url;
-      image.alt = item.desc;
-      image.loading = 'lazy';
-      button.appendChild(image);
-      panel.appendChild(button);
-    });
+
+    const show = index => {
+      const group = groups[index] ?? groups[0];
+      grid.innerHTML = '';
+      group.emoticons.forEach(item => grid.appendChild(createEmoteButton(item)));
+      grid.scrollTop = 0;
+      panel.querySelectorAll('.lp-tab').forEach(tab => {
+        tab.classList.toggle('active', Number(tab.dataset.index) === index);
+      });
+    };
+
+    // 只有一个包时不显示切换条, 少一层干扰
+    if (groups.length > 1) {
+      const tabs = document.createElement('div');
+      tabs.className = 'lp-tabs';
+      groups.forEach((group, index) => {
+        const tab = document.createElement('button');
+        tab.type = 'button';
+        tab.className = 'lp-tab';
+        tab.dataset.index = String(index);
+        // 用该包第一个表情的图当图标, 跟原生面板一致; 没有图才退回文字
+        const icon = group.emoticons[0]?.url;
+        tab.title = group.name;
+        tab.setAttribute('aria-label', group.name);
+        if (icon) {
+          const image = document.createElement('img');
+          image.src = icon;
+          image.alt = group.name;
+          image.loading = 'lazy';
+          tab.appendChild(image);
+        } else {
+          tab.textContent = group.name.slice(0, 2);
+        }
+        tabs.appendChild(tab);
+      });
+      tabs.addEventListener('click', event => {
+        const tab = event.target.closest('.lp-tab');
+        if (!tab) {
+          return;
+        }
+        event.stopPropagation();
+        show(Number(tab.dataset.index));
+      });
+      panel.appendChild(tabs);
+    }
+
+    panel.appendChild(grid);
+    show(0);
+    return true;
   }
 
   // ===== 样式 =====
@@ -481,17 +595,66 @@
         right: 0;
         bottom: calc(100% + 4px);
         display: none;
-        grid-template-columns: repeat(auto-fill, 28px);
-        gap: 4px;
-        max-height: 200px;
+        flex-direction: column;
+        gap: 6px;
+        max-height: 240px;
         padding: 8px;
-        overflow-y: auto;
+        overflow: hidden;
         background: rgba(20, 20, 20, 0.92);
         border-radius: 8px;
         box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
       }
       .${BAR_CLASS} .lp-panel.open {
+        display: flex;
+      }
+      .${BAR_CLASS} .lp-tabs {
+        flex: 0 0 auto;
+        display: flex;
+        gap: 4px;
+        overflow-x: auto;
+        overflow-y: hidden;
+        scrollbar-width: thin;
+      }
+      .${BAR_CLASS} .lp-tab {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 26px;
+        height: 26px;
+        padding: 0 5px;
+        font-size: 12px;
+        line-height: 18px;
+        color: rgba(255, 255, 255, 0.75);
+        background: rgba(255, 255, 255, 0.08);
+        border: none;
+        border-radius: 6px;
+        white-space: nowrap;
+        cursor: pointer;
+        transition: background-color 0.15s ease-out, color 0.15s ease-out;
+      }
+      .${BAR_CLASS} .lp-tab img {
+        display: block;
+        width: 20px;
+        height: 20px;
+        object-fit: contain;
+      }
+      .${BAR_CLASS} .lp-tab:hover {
+        color: #fff;
+        background: rgba(255, 255, 255, 0.18);
+      }
+      .${BAR_CLASS} .lp-tab.active {
+        color: #fff;
+        background: var(--theme-color, #00aeec);
+      }
+      .${BAR_CLASS} .lp-grid {
+        flex: 1 1 auto;
+        min-height: 0;
         display: grid;
+        grid-template-columns: repeat(auto-fill, 28px);
+        gap: 4px;
+        align-content: start;
+        overflow-y: auto;
       }
       .${BAR_CLASS} .lp-emote {
         width: 28px;
@@ -506,6 +669,10 @@
       }
       .${BAR_CLASS} .lp-emote:hover {
         background: rgba(255, 255, 255, 0.15);
+      }
+      /* 大表情: 点一下直接发送, 加一圈微弱的边框作为提示 */
+      .${BAR_CLASS} .lp-emote-big {
+        box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.2);
       }
       .${BAR_CLASS} .lp-emote img {
         width: 100%;
@@ -589,6 +756,23 @@
       }
     };
 
+    // 大表情: unique 就是发送码, 单独发一条, 不塞进输入框
+    const doSendEmote = async (unique, label) => {
+      if (!unique || sending) {
+        return;
+      }
+      sending = true;
+      input.disabled = true;
+      const result = await sendDanmaku(unique, true);
+      sending = false;
+      input.disabled = false;
+      showStatus(
+        result.ok ? '大表情已发送' : result.message,
+        result.ok ? 'ok' : 'fail',
+        result.ok ? 2000 : 6000,
+      );
+    };
+
     input.addEventListener('focus', () => {
       lockControlBar(true);
       wrapper.classList.add('pinned');
@@ -625,7 +809,11 @@
       panel.classList.toggle('open');
       if (panel.classList.contains('open') && !panel.dataset.loaded) {
         panel.dataset.loaded = '1';
-        await renderEmotes(panel);
+        const gotReal = await renderEmotes(panel);
+        // 接口/网络失败时允许下次打开重试, 否则会一直卡在字符表情, 只能刷新页面
+        if (!gotReal && emoteFailed) {
+          delete panel.dataset.loaded;
+        }
       }
     });
 
@@ -636,6 +824,11 @@
         return;
       }
       event.stopPropagation();
+      // 大表情: 直接发送, 不塞进输入框
+      if (button.dataset.emote) {
+        void doSendEmote(button.dataset.emote, button.title);
+        return;
+      }
       insertAtCursor(input, button.dataset.text || button.textContent);
     });
 
