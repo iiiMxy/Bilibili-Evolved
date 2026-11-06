@@ -209,37 +209,16 @@
 
   // ===== 隐藏原生输入栏 =====
 
-  /** 自动定位原生输入栏：同时包含输入框、数字/数字 计数和「发送」按钮的容器 */
-  function findNativeBar() {
-    if (NATIVE_BAR_SELECTOR) {
-      // 填了选择器就只认它，不再向下猜测，避免误伤粉丝留言框等其它输入框
-      return document.querySelector(NATIVE_BAR_SELECTOR);
-    }
-    const sendButtons = [...document.querySelectorAll('button, div, span, a')].filter(
-      element => element.childElementCount === 0 && element.textContent.trim() === '发送',
-    );
-    for (const button of sendButtons) {
-      let node = button.parentElement;
-      for (let depth = 0; node && depth < 8; depth += 1, node = node.parentElement) {
-        const rect = node.getBoundingClientRect();
-        // 只认「一条细长输入栏」，避免误伤整个播放器或页面容器
-        if (rect.height <= 0 || rect.height > 120 || rect.width < 200) {
-          continue;
-        }
-        const hasInput = Boolean(node.querySelector('input, textarea, [contenteditable="true"]'));
-        const hasCounter = /\d+\s*\/\s*\d+/.test(node.textContent || '');
-        if (hasInput && hasCounter) {
-          return node;
-        }
-      }
-    }
-    return null;
-  }
-
   const hiddenNativeBars = [];
 
   function hideNativeBar() {
-    const bar = findNativeBar();
+    // 顺手清掉已经脱离文档的旧记录, 避免长时间挂机越攒越多
+    for (let index = hiddenNativeBars.length - 1; index >= 0; index -= 1) {
+      if (!document.contains(hiddenNativeBars[index].element)) {
+        hiddenNativeBars.splice(index, 1);
+      }
+    }
+    const bar = document.querySelector(NATIVE_BAR_SELECTOR);
     if (!bar || hiddenNativeBars.some(record => record.element === bar)) {
       return;
     }
@@ -333,59 +312,18 @@
     input.focus();
   }
 
-  const SVG_NS = 'http://www.w3.org/2000/svg';
+  /** 仿 B 站直播表情按钮的小黄脸图标; 想 1:1 用原生图标就覆盖 EMOJI_ICON_SVG */
+  const DEFAULT_EMOJI_ICON = `<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+    <circle cx="12" cy="12" r="11" fill="#FFD44D"/>
+    <ellipse cx="8.6" cy="10.2" rx="1.55" ry="2.3" fill="#6B4A1B"/>
+    <path d="M13.6 10.2c.9-1.5 2.2-1.8 3.4-.9" fill="none" stroke="#6B4A1B" stroke-width="1.7" stroke-linecap="round"/>
+    <path d="M8.9 14.5c.9 1.4 1.9 2.1 3.1 2.1s2.2-.7 3.1-2.1" fill="none" stroke="#6B4A1B" stroke-width="1.7" stroke-linecap="round"/>
+  </svg>`;
 
-  /** 仿 B 站直播原生表情按钮的小黄脸图标（内联 SVG，不依赖外部资源） */
   function createEmojiIcon() {
-    if (EMOJI_ICON_SVG) {
-      const template = document.createElement('template');
-      template.innerHTML = EMOJI_ICON_SVG.trim();
-      const node = template.content.firstElementChild;
-      if (node) {
-        return node;
-      }
-    }
-    const svg = document.createElementNS(SVG_NS, 'svg');
-    svg.setAttribute('viewBox', '0 0 24 24');
-    svg.setAttribute('width', '20');
-    svg.setAttribute('height', '20');
-    svg.setAttribute('aria-hidden', 'true');
-
-    const face = document.createElementNS(SVG_NS, 'circle');
-    face.setAttribute('cx', '12');
-    face.setAttribute('cy', '12');
-    face.setAttribute('r', '11');
-    face.setAttribute('fill', '#FFD44D');
-
-    // 左眼：竖向椭圆
-    const leftEye = document.createElementNS(SVG_NS, 'ellipse');
-    leftEye.setAttribute('cx', '8.6');
-    leftEye.setAttribute('cy', '10.2');
-    leftEye.setAttribute('rx', '1.55');
-    leftEye.setAttribute('ry', '2.3');
-    leftEye.setAttribute('fill', '#6B4A1B');
-
-    // 右眼：眨眼弧线
-    const wink = document.createElementNS(SVG_NS, 'path');
-    wink.setAttribute('d', 'M13.6 10.2c.9-1.5 2.2-1.8 3.4-.9');
-    wink.setAttribute('fill', 'none');
-    wink.setAttribute('stroke', '#6B4A1B');
-    wink.setAttribute('stroke-width', '1.7');
-    wink.setAttribute('stroke-linecap', 'round');
-
-    // 嘴：微笑弧
-    const mouth = document.createElementNS(SVG_NS, 'path');
-    mouth.setAttribute('d', 'M8.9 14.5c.9 1.4 1.9 2.1 3.1 2.1s2.2-.7 3.1-2.1');
-    mouth.setAttribute('fill', 'none');
-    mouth.setAttribute('stroke', '#6B4A1B');
-    mouth.setAttribute('stroke-width', '1.7');
-    mouth.setAttribute('stroke-linecap', 'round');
-
-    svg.appendChild(face);
-    svg.appendChild(leftEye);
-    svg.appendChild(wink);
-    svg.appendChild(mouth);
-    return svg;
+    const template = document.createElement('template');
+    template.innerHTML = (EMOJI_ICON_SVG || DEFAULT_EMOJI_ICON).trim();
+    return template.content.firstElementChild ?? document.createElement('span');
   }
 
   function createEmoteButton(item) {
@@ -396,7 +334,6 @@
     if (item.big) {
       // 大表情不能和文字混发, 点一下就单独发出去
       button.dataset.emote = item.unique;
-      button.classList.add('lp-emote-big');
       button.title = `${item.desc}（大表情，点一下直接发送）`;
     } else {
       button.title = item.desc;
@@ -409,8 +346,28 @@
     return button;
   }
 
+  // 记住上次选中的表情分类, 下次打开面板直接回到那一类
+  const EMOTE_TAB_KEY = 'lp-danmaku-emote-tab';
+
+  function readEmoteTab() {
+    try {
+      const value = Number(window.localStorage.getItem(EMOTE_TAB_KEY));
+      return Number.isInteger(value) && value >= 0 ? value : 0;
+    } catch (error) {
+      return 0;
+    }
+  }
+
+  function saveEmoteTab(index) {
+    try {
+      window.localStorage.setItem(EMOTE_TAB_KEY, String(index));
+    } catch (error) {
+      /* 隐私模式或存储被禁用时忽略, 不影响使用 */
+    }
+  }
+
   /**
-   * 渲染表情面板: 顶部按「表情包」切换(对齐原生面板), 下面是当前包的网格。
+   * 渲染表情面板: 上方是当前分类的网格, 底部是分类栏(对齐原生面板)。
    * 返回是否拿到了真实表情; 没拿到时退回字符表情。
    */
   async function renderEmotes(panel) {
@@ -419,6 +376,8 @@
 
     const grid = document.createElement('div');
     grid.className = 'lp-grid';
+    // 先放网格、后放分类栏: 分类栏因此固定在面板底部, 切换分类时它不会跟着上下跑
+    panel.appendChild(grid);
 
     if (!groups) {
       FALLBACK_EMOJIS.forEach(character => {
@@ -429,18 +388,19 @@
         button.dataset.text = character;
         grid.appendChild(button);
       });
-      panel.appendChild(grid);
       return false;
     }
 
     const show = index => {
-      const group = groups[index] ?? groups[0];
+      const target = Math.max(0, Math.min(index, groups.length - 1));
+      const group = groups[target];
       grid.innerHTML = '';
       group.emoticons.forEach(item => grid.appendChild(createEmoteButton(item)));
       grid.scrollTop = 0;
       panel.querySelectorAll('.lp-tab').forEach(tab => {
-        tab.classList.toggle('active', Number(tab.dataset.index) === index);
+        tab.classList.toggle('active', Number(tab.dataset.index) === target);
       });
+      saveEmoteTab(target);
     };
 
     // 只有一个包时不显示切换条, 少一层干扰
@@ -478,8 +438,8 @@
       panel.appendChild(tabs);
     }
 
-    panel.appendChild(grid);
-    show(0);
+    // 打开面板时回到上次看的那一类
+    show(readEmoteTab());
     return true;
   }
 
@@ -501,7 +461,8 @@
         display: flex;
         flex-direction: column;
         align-items: stretch;
-        width: min(420px, 56%);
+        /* 加宽到 480 后, 56px 的表情每行能放 7 个 */
+        width: min(480px, 62%);
         opacity: 0;
         transition: opacity 0.2s ease-out;
         pointer-events: none;
@@ -589,6 +550,7 @@
       .${BAR_CLASS} .lp-status.fail {
         color: #ff9b9b;
       }
+      /* 面板: 靠底色分层, 不用边框也不用阴影; 整体 80% 不透明, 不完全挡住所画面 */
       .${BAR_CLASS} .lp-panel {
         position: absolute;
         left: 0;
@@ -596,23 +558,33 @@
         bottom: calc(100% + 4px);
         display: none;
         flex-direction: column;
-        gap: 6px;
-        max-height: 240px;
-        padding: 8px;
         overflow: hidden;
-        background: rgba(20, 20, 20, 0.92);
-        border-radius: 8px;
-        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+        border-radius: 10px;
+        opacity: 0.8;
       }
       .${BAR_CLASS} .lp-panel.open {
         display: flex;
       }
+      /* 表情区: 中灰底. 高度锁死为 3 行(3×45 + 2×8 + 上下各 12), 切换分类时面板不会伸缩 */
+      .${BAR_CLASS} .lp-grid {
+        height: 175px;
+        display: grid;
+        grid-template-columns: repeat(auto-fill, 45px);
+        gap: 8px;
+        padding: 12px;
+        align-content: start;
+        overflow-y: auto;
+        background: #43434a;
+      }
+      /* 类别栏: 深灰底, 固定在面板底部; 图标比表情区明一些, 两边视觉重量才平衡 */
       .${BAR_CLASS} .lp-tabs {
         flex: 0 0 auto;
         display: flex;
-        gap: 4px;
+        gap: 6px;
+        padding: 8px 10px;
         overflow-x: auto;
         overflow-y: hidden;
+        background: #2b2b31;
         scrollbar-width: thin;
       }
       .${BAR_CLASS} .lp-tab {
@@ -620,59 +592,44 @@
         display: flex;
         align-items: center;
         justify-content: center;
-        min-width: 26px;
-        height: 26px;
-        padding: 0 5px;
+        width: 34px;
+        height: 34px;
+        padding: 0;
         font-size: 12px;
         line-height: 18px;
         color: rgba(255, 255, 255, 0.75);
-        background: rgba(255, 255, 255, 0.08);
+        background: rgba(255, 255, 255, 0.07);
         border: none;
-        border-radius: 6px;
+        border-radius: 7px;
         white-space: nowrap;
         cursor: pointer;
-        transition: background-color 0.15s ease-out, color 0.15s ease-out;
+        transition: background-color 0.15s ease-out;
       }
       .${BAR_CLASS} .lp-tab img {
         display: block;
-        width: 20px;
-        height: 20px;
+        width: 24px;
+        height: 24px;
         object-fit: contain;
       }
       .${BAR_CLASS} .lp-tab:hover {
-        color: #fff;
-        background: rgba(255, 255, 255, 0.18);
+        background: rgba(255, 255, 255, 0.16);
       }
       .${BAR_CLASS} .lp-tab.active {
-        color: #fff;
         background: var(--theme-color, #00aeec);
       }
-      .${BAR_CLASS} .lp-grid {
-        flex: 1 1 auto;
-        min-height: 0;
-        display: grid;
-        grid-template-columns: repeat(auto-fill, 28px);
-        gap: 4px;
-        align-content: start;
-        overflow-y: auto;
-      }
       .${BAR_CLASS} .lp-emote {
-        width: 28px;
-        height: 28px;
+        width: 45px;
+        height: 45px;
         padding: 2px;
-        font-size: 18px;
+        font-size: 24px;
         line-height: 1;
         background: transparent;
         border: none;
-        border-radius: 4px;
+        border-radius: 6px;
         cursor: pointer;
       }
       .${BAR_CLASS} .lp-emote:hover {
-        background: rgba(255, 255, 255, 0.15);
-      }
-      /* 大表情: 点一下直接发送, 加一圈微弱的边框作为提示 */
-      .${BAR_CLASS} .lp-emote-big {
-        box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.2);
+        background: rgba(0, 0, 0, 0.16);
       }
       .${BAR_CLASS} .lp-emote img {
         width: 100%;
@@ -735,42 +692,50 @@
       }, duration);
     };
 
-    const doSend = async () => {
-      const text = input.value.trim();
-      if (!text || sending) {
-        return;
+    /** 发送期间禁用输入框, 结束后恢复; 同一时间只允许发一条 */
+    const runSend = async task => {
+      if (sending) {
+        return null;
       }
       sending = true;
       input.disabled = true;
-      const result = await sendDanmaku(text);
-      sending = false;
-      input.disabled = false;
-      if (result.ok) {
-        input.value = '';
-        showStatus(result.message, 'ok', 2000);
-      } else {
-        // 失败时保留内容，方便改词重发
-        showStatus(result.message, 'fail', 6000);
-        input.focus();
-        input.select();
+      try {
+        return await task();
+      } finally {
+        sending = false;
+        input.disabled = false;
       }
     };
 
-    // 大表情: unique 就是发送码, 单独发一条, 不塞进输入框
-    const doSendEmote = async (unique, label) => {
-      if (!unique || sending) {
+    const doSend = async () => {
+      const text = input.value.trim();
+      if (!text) {
         return;
       }
-      sending = true;
-      input.disabled = true;
-      const result = await sendDanmaku(unique, true);
-      sending = false;
-      input.disabled = false;
-      showStatus(
-        result.ok ? '大表情已发送' : result.message,
-        result.ok ? 'ok' : 'fail',
-        result.ok ? 2000 : 6000,
-      );
+      const result = await runSend(() => sendDanmaku(text));
+      if (!result) {
+        return;
+      }
+      if (result.ok) {
+        input.value = '';
+        showStatus(result.message, 'ok', 2000);
+        return;
+      }
+      // 失败时保留内容，方便改词重发
+      showStatus(result.message, 'fail', 6000);
+      input.focus();
+      input.select();
+    };
+
+    // 大表情: unique 就是发送码, 单独发一条, 不塞进输入框
+    const doSendEmote = async unique => {
+      if (!unique) {
+        return;
+      }
+      const result = await runSend(() => sendDanmaku(unique, true));
+      if (result) {
+        showStatus(result.message, result.ok ? 'ok' : 'fail', result.ok ? 2000 : 6000);
+      }
     };
 
     input.addEventListener('focus', () => {
@@ -826,7 +791,7 @@
       event.stopPropagation();
       // 大表情: 直接发送, 不塞进输入框
       if (button.dataset.emote) {
-        void doSendEmote(button.dataset.emote, button.title);
+        void doSendEmote(button.dataset.emote);
         return;
       }
       insertAtCursor(input, button.dataset.text || button.textContent);
