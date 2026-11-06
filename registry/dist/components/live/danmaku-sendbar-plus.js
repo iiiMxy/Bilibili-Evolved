@@ -19,10 +19,6 @@
   // 发送请求的最长等待时间, 超过就当超时处理, 避免网络卡住时输入框被永久禁用
   const SEND_TIMEOUT_MS = 10000;
 
-  // 原生输入栏的选择器. 网页全屏下 B 站用的是 .fullscreen-danmaku 这套容器,
-  // 里面的结构是: INPUT.chat-input / SPAN.input-limit-hint / DIV.send-danmaku
-  const NATIVE_BAR_SELECTOR = '.fullscreen-danmaku';
-
   // 想 1:1 使用原生图标时, 把它的 <svg>...</svg> 整段贴到这里(留空则用内置的画法)
   const EMOJI_ICON_SVG = '';
 
@@ -205,37 +201,6 @@
     } catch (error) {
       /* 播放器没有该 API 时忽略 */
     }
-  }
-
-  // ===== 隐藏原生输入栏 =====
-
-  const hiddenNativeBars = [];
-
-  function hideNativeBar() {
-    // 顺手清掉已经脱离文档的旧记录, 避免长时间挂机越攒越多
-    for (let index = hiddenNativeBars.length - 1; index >= 0; index -= 1) {
-      if (!document.contains(hiddenNativeBars[index].element)) {
-        hiddenNativeBars.splice(index, 1);
-      }
-    }
-    const bar = document.querySelector(NATIVE_BAR_SELECTOR);
-    if (!bar || hiddenNativeBars.some(record => record.element === bar)) {
-      return;
-    }
-    hiddenNativeBars.push({ element: bar, display: bar.style.display });
-    bar.style.setProperty('display', 'none', 'important');
-    console.log('[弹幕发送] 已隐藏原生输入栏', bar);
-  }
-
-  function restoreNativeBar() {
-    hiddenNativeBars.forEach(record => {
-      if (record.display) {
-        record.element.style.display = record.display;
-      } else {
-        record.element.style.removeProperty('display');
-      }
-    });
-    hiddenNativeBars.length = 0;
   }
 
   // ===== 表情 =====
@@ -843,6 +808,14 @@
       if (!isRoomPage()) {
         return;
       }
+      // 真全屏时 B 站自带输入栏, 不插手; 从这里退回网页全屏会自动补挂
+      if (document.fullscreenElement) {
+        if (mounted) {
+          mounted.destroy();
+          mounted = null;
+        }
+        return;
+      }
       const player = await waitFor('.live-player-mounter', 5000);
       if (!player) {
         return;
@@ -852,7 +825,6 @@
         mounted.destroy();
         mounted = null;
       }
-      hideNativeBar();
       if (player.querySelector(`.${BAR_CLASS}`)) {
         return;
       }
@@ -878,7 +850,6 @@
       mounted?.destroy();
       mounted = null;
       document.getElementById(STYLE_ID)?.remove();
-      restoreNativeBar();
       console.log('[弹幕发送] 已清理');
     };
   }
