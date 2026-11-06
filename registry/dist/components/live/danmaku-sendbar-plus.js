@@ -1,3 +1,5 @@
+// 【BE 版】Bilibili Evolved 组件 — 放进 registry/dist/components/live/ 或用 raw 链接安装
+// 本文件由 _shared-body.js 生成, 修改源文件后运行 node _build.js 重新生成
 (() => {
   'use strict';
 
@@ -14,6 +16,8 @@
   const STYLE_ID = 'lp-danmaku-bar-style';
   const SEND_URL = 'https://api.live.bilibili.com/msg/send';
   const EMOTE_URL = 'https://api.live.bilibili.com/xlive/web-ucenter/v2/emoticon/GetEmoticons';
+  // 发送请求的最长等待时间, 超过就当超时处理, 避免网络卡住时输入框被永久禁用
+  const SEND_TIMEOUT_MS = 10000;
 
   // 原生输入栏的选择器. 网页全屏下 B 站用的是 .fullscreen-danmaku 这套容器,
   // 里面的结构是: INPUT.chat-input / SPAN.input-limit-hint / DIV.send-danmaku
@@ -37,6 +41,11 @@
   const page = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+  /** 当前是否在直播间页面; 与组件版 metadata 里的 urlInclude 规则保持一致 */
+  function isRoomPage() {
+    return /^\/(?:blanc\/)?\d+(?:[/?#]|$)/.test(location.pathname);
+  }
 
   async function waitFor(selector, timeout) {
     const deadline = Date.now() + timeout;
@@ -111,15 +120,26 @@
     });
 
     let response;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), SEND_TIMEOUT_MS);
     try {
       response = await fetch(SEND_URL, {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body,
+        signal: controller.signal,
       });
     } catch (error) {
+      if (error?.name === 'AbortError') {
+        return {
+          ok: false,
+          message: `请求超时（${SEND_TIMEOUT_MS / 1000} 秒没响应），弹幕可能没发出，请稍后重试`,
+        };
+      }
       return { ok: false, message: `网络错误：${error?.message ?? error}` };
+    } finally {
+      window.clearTimeout(timeout);
     }
 
     let json = null;
@@ -130,8 +150,10 @@
     }
     console.log('[弹幕发送] /msg/send ->', response.status, json);
 
+    // 先看 HTTP 状态码: 否则服务器 500 会被当成「不是 JSON」，误报成被风控拦截
     if (!response.ok) {
-      return { ok: false, message: `HTTP ${response.status}` };
+      const detail = json?.message || json?.msg || '';
+      return { ok: false, message: `HTTP ${response.status}${detail ? `：${detail}` : ''}` };
     }
     if (!json) {
       return { ok: false, message: '响应不是 JSON，可能被风控拦截' };
@@ -140,8 +162,17 @@
       const detail = json.message || json.msg || '发送失败';
       return { ok: false, message: `${detail}（code=${json.code}）` };
     }
-    if (typeof json.msg === 'string' && REASONS[json.msg]) {
-      return { ok: false, message: REASONS[json.msg] };
+    // code 是 0 也不等于真的发出去了: 真实结果在 msg 里
+    const msg = typeof json.msg === 'string' ? json.msg.trim() : '';
+    if (msg && REASONS[msg]) {
+      return { ok: false, message: REASONS[msg] };
+    }
+    if (msg) {
+      // 没见过的返回值: 宁可如实说「不确定」，也不要谎报成功
+      return {
+        ok: false,
+        message: `接口返回了没见过的结果（msg=${msg}），不确定是否发出，请到弹幕列表确认`,
+      };
     }
     return { ok: true, message: '发送成功' };
   }
@@ -649,6 +680,11 @@
     let mounted = null;
 
     const tick = async () => {
+      // 只在直播间页面挂载: 油猴版的 @match 是全站, 组件版靠 urlInclude,
+      // 这里统一判一次, 两个版本的行为就一致了
+      if (!isRoomPage()) {
+        return;
+      }
       const player = await waitFor('.live-player-mounter', 5000);
       if (!player) {
         return;
